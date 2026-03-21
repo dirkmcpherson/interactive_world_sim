@@ -1,0 +1,38 @@
+defaults:
+  - base_dataset
+
+# Path to the ManiSkill trajectory HDF5 and JSON files
+dataset_path: ${oc.env:HOME}/.maniskill/demos/StackCube-v1/motionplanning/trajectory.state+rgb+depth.pd_ee_delta_pos.physx_cpu.h5
+json_path: ${oc.env:HOME}/.maniskill/demos/StackCube-v1/motionplanning/trajectory.state+rgb+depth.pd_ee_delta_pos.physx_cpu.json
+cache_dir: data/maniskill_cache/StackCube-v1
+
+horizon: 16
+val_horizon: 16
+val_ratio: 0.1
+aug_mode: none
+skip_frame: 1
+pad_after: 7
+pad_before: 1
+seed: 42
+skip_idx: 4
+use_cache: true
+resolution: 128
+goal_sample: intermediate
+
+shape_meta:
+  action:
+    shape:
+    - 4  # pd_ee_delta_pos: 3D EE delta + 1 gripper
+  obs:
+    base_camera_rgb:
+      shape:
+      - 3  # C
+      - 128  # H
+      - 128  # W
+      type: rgb
+    hand_camera_rgb:
+      shape:
+      - 3  # C
+      - 128  # H
+      - 128  # W
+      type: rgb

@@ -1,7 +1,7 @@
 defaults:
   - base_dataset
 
-dataset_dir: data/sim_aloha/transfer_cube_0301
+dataset_dir: data/pusht_mujoco
 horizon: 16
 val_horizon: 16
 aug_mode: none
