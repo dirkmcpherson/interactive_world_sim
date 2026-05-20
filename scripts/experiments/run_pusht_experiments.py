@@ -36,7 +36,14 @@ from interactive_world_sim.algorithms.latent_dynamics.latent_world_model import 
 # ── Model loading (adapted from teleoperate_keyboard.py:39-70) ────────────────
 def load_model(ckpt_path: str) -> LatentWorldModel:
     """Load a trained world model from checkpoint."""
+    import numpy as _np
     from omegaconf import OmegaConf
+
+    # Register custom resolvers used by Hydra configs
+    if not OmegaConf.has_resolver("eval"):
+        OmegaConf.register_new_resolver("eval", lambda expr: eval(expr, {"np": _np}))
+    if not OmegaConf.has_resolver("torch"):
+        OmegaConf.register_new_resolver("torch", lambda x: getattr(torch, x))
 
     cfg_path = Path(ckpt_path).parent.parent / ".hydra" / "config.yaml"
     cfg = OmegaConf.load(cfg_path)
@@ -346,6 +353,84 @@ def exp4_demo_worldmodel(
     return video_path
 
 
+# ── Experiment 5: Constant directional push in world model ──────────────────
+def exp5_directional_worldmodel(
+    checkpoint: str,
+    output_dir: str,
+    data_dir: str,
+    episode_idx: int = 0,
+    num_steps: int = 200,
+    direction: str = "right",
+) -> str:
+    """Move both arms in a constant direction through the world model."""
+    # Direction → normalized action delta per step
+    delta_map = {
+        "right": np.array([0.02, 0.0, 0.02, 0.0]),
+        "left":  np.array([-0.02, 0.0, -0.02, 0.0]),
+        "up":    np.array([0.0, 0.02, 0.0, 0.02]),
+        "down":  np.array([0.0, -0.02, 0.0, -0.02]),
+    }
+    delta = delta_map.get(direction, delta_map["right"])
+
+    print(f"=== Experiment 5: Constant push ({direction}) in world model ===")
+    model = load_model(checkpoint)
+    normalizer = model.normalizer
+    device = model.device
+    dtype = model.dtype
+    resolution = 128
+
+    episode = load_episode(data_dir, episode_idx)
+    init_img = episode["images"][0]
+    init_action = episode["action"][0]
+
+    img_tensor = torch.from_numpy(init_img).float() / 255.0
+    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+    img_tensor = normalizer["top_pov"].normalize(img_tensor).to(device)
+    with torch.no_grad():
+        curr_latent = model.encoder_forward(img_tensor)[:, None]
+
+    curr_action = torch.from_numpy(init_action).to(device).float()
+    curr_action = normalizer["action"].normalize(curr_action)
+
+    video_path = f"{output_dir}/exp5_directional_{direction}.mp4"
+    vis_size = 256
+    writer = make_video_writer(video_path, 30, (vis_size, vis_size))
+
+    with torch.no_grad():
+        rendered = render_img_cm(model, curr_latent[:, -1], resolution, normalizer, num_views=1)
+    writer.write(tensor_to_bgr(rendered[0], vis_size))
+
+    delta_t = torch.from_numpy(delta).to(device).float()
+    hist_context = 10
+    action_hist = []
+    for step in range(1, num_steps):
+        curr_action = torch.clamp(curr_action + delta_t, -1.0, 1.0)
+
+        action_chunk = curr_action.reshape(1, -1)
+        action_hist.append(action_chunk)
+        action = torch.cat(action_hist, dim=0)[-(hist_context + 1):]
+        action = rearrange(action, "t a -> 1 t a").to(device=device, dtype=dtype)
+
+        with torch.no_grad():
+            latent_pred = model.dynamics_forward(curr_latent, action)
+        curr_latent = torch.cat([curr_latent, latent_pred], dim=1)
+        curr_latent = curr_latent[:, -hist_context:]
+
+        with torch.no_grad():
+            rendered = render_img_cm(model, curr_latent[:, -1], resolution, normalizer, num_views=1)
+        wm_bgr = tensor_to_bgr(rendered[0], vis_size)
+        cv2.putText(wm_bgr, f"{direction} step {step}", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        writer.write(wm_bgr)
+
+        if step % 50 == 0:
+            print(f"  Step {step}/{num_steps}")
+
+    writer.release()
+    print(f"  Saved: {video_path}")
+    return video_path
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="PushT MuJoCo Experiments")
@@ -353,7 +438,7 @@ def main() -> None:
         "--experiment",
         type=str,
         default="all",
-        choices=["1", "2", "3", "4", "all"],
+        choices=["1", "2", "3", "4", "5", "all"],
         help="Which experiment to run",
     )
     parser.add_argument(
@@ -377,6 +462,13 @@ def main() -> None:
     parser.add_argument("--episode_idx", type=int, default=0, help="Episode index to use")
     parser.add_argument("--num_steps", type=int, default=200, help="Number of steps per experiment")
     parser.add_argument("--debug", action="store_true", help="Debug mode: 10 steps only")
+    parser.add_argument(
+        "--direction",
+        type=str,
+        default="right",
+        choices=["right", "left", "up", "down"],
+        help="Direction for experiment 5 (default: right)",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -385,7 +477,7 @@ def main() -> None:
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    needs_ckpt = args.experiment in ["2", "4", "all"]
+    needs_ckpt = args.experiment in ["2", "4", "5", "all"]
     if needs_ckpt and args.checkpoint is None:
         parser.error("--checkpoint is required for experiments 2, 4, and all")
 
@@ -405,6 +497,11 @@ def main() -> None:
         # If running exp 4 standalone, we don't have mujoco_frames for side-by-side
         exp4_demo_worldmodel(
             args.checkpoint, args.output_dir, args.data_dir, args.episode_idx, args.num_steps, mujoco_frames
+        )
+
+    if exp in ["5", "all"]:
+        exp5_directional_worldmodel(
+            args.checkpoint, args.output_dir, args.data_dir, args.episode_idx, args.num_steps, args.direction
         )
 
     print("\nAll requested experiments complete!")
